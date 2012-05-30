@@ -1,0 +1,496 @@
+version 1.0;
+
+/*	This script emulates the ScreenOS "get policies" functionality on an SRX branch or HE device.
+	
+	Additions to the policy-ipmatch.slax script include:
+		- "ScreenOS-like" top header counting all policies (Global and Regular separate) and displaying the default policy action.
+		- Column truncation formatting of long source/destination addresses and policy and application names.
+		- Addition of ScreenOS-like FW services quick view "ASTLCB and AUWG" for quickly viewing enabled services.
+		- Addition of policy ID's in the output.
+		- Added "to-zone" and "from-zone" search capability for Global policies.
+*/
+
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+
+import "../import/junos.xsl";
+
+var $arguments = {
+	<argument> {
+        <name> "source-address";
+        <description> "Source IP address of the initial session creation packet";
+    }
+    <argument> {
+        <name> "destination-address";
+        <description> "Destination IP address of the initial session creation packet";
+    }
+    <argument> {
+        <name> "source-port";
+        <description> "Source port of the packet";
+    }
+    <argument> {
+        <name> "destination-port";
+        <description> "Destination port of the packet";
+    }
+    <argument> {
+        <name> "from-zone";
+        <description> "Ingress zone of the packet";
+    }
+    <argument> {
+        <name> "to-zone";
+        <description> "Egress zone of the packet";
+    }
+}
+
+/* Open a persistent connection */
+var $connection = jcs:open();
+param $num-matches = {
+	expr "0";
+}
+param $from-zone = {
+    call find-zone($ip = $source-address);
+}
+param $to-zone = {
+    call find-zone($ip = $destination-address);
+}
+param $source-address = {
+    expr "0.0.0.0/0";
+}
+param $destination-address = {
+    expr "0.0.0.0/0";
+}
+param $source-port = {
+    expr "0";
+}
+param $destination-port = {
+    expr "0";
+}
+param $protocol = {
+    expr "0";
+}
+
+
+/* print-policy: Displays the policy info */
+template print-policy ( $name, $default-pol, $num-regular-matches, $num-global-matches, $policy-id, $from-zone, $to-zone, $source-address, $destination-address, $source-port, $destination-port, $protocol, $application, $action, $comment, $row = number("1"), $header = false(), $idp, $scheduling, $shaping, $logging, $counting, $ha-backup, $appfw, $uac, $wx, $gprs ) {
+    
+	var $header-row1 = "%s \n%s \n\n";
+	var $header-row2 = "%23s %-3.5s \n%-23s %-3.5s %7s %-7s \n";
+	var $header-row3 = "%s \n";
+	var $header-row4 = "%5.5s %-10.10s %-10.10s %-12.12s %-20.20s %-20.20s %-20.20s %-8s %1s%1s%1s%1s%1s%1s %1s%1s%1s%1s \n";
+		
+	var $dashes = "----------------------------------------------------------------------------------------------------------------------------";
+	
+    if ($header) {
+		expr jcs:printf( $header-row3, $dashes );
+		expr jcs:printf( $header-row1, "(ASTLCB = IDP, Policy Scheduling, Traffic Shaping, Logging, Counting, HA Session Backup)", "(AUWG = AppFW, UAC, WX, GPRS)" );
+
+		expr jcs:printf( $header-row2, "Total regular policies =", $num-regular-matches, "Total global policies =", $num-global-matches, "Default", $default-pol  );
+		expr jcs:printf( $header-row3, $dashes );
+		expr jcs:printf( $header-row4, "ID", "From-Zone", "To-Zone", "Name", "Src-address", "Dst-address", "Service", "Action", "A", "S", "T", "L", "C", "B", "A", "U", "W", "G" );
+    
+    } 
+	else {
+		
+		
+		var $num-rows = {
+            if (count($application) >= count($source-address) && count($application) >= count($destination-address)) {
+                expr count($application);
+            
+            } else if (count($source-address) > count($application) && count($source-address) > count($destination-address)) {
+                expr count($source-address);
+            
+            } else {
+                expr count($destination-address);
+            }
+        }
+		if ($row <= $num-rows) {
+			var $shrink-name = {
+				call fit-to-column( $name );
+				}
+			var $shrink-from-zone = {
+				call fit-to-column($from-zone);
+			}
+			var $shrink-to-zone = {
+				call fit-to-column($to-zone);
+			}
+			var $test-sourceIP = $source-address[$row];
+				var $shrink-source-address = {
+				call fit-to-column( $test-sourceIP );
+				}
+			var $test-destIP = $destination-address[$row];
+				var $shrink-destination-address = {
+				call fit-to-column( $test-destIP );
+				}
+			var $test-application = $application[$row];
+				var $shrink-application = {
+				call fit-to-column( $test-application );
+				}
+			var $get-policies-rpc = <command> {
+				expr "show security policies detail ";
+			}
+			
+            expr jcs:printf($header-row4, $policy-id, $shrink-from-zone, $shrink-to-zone, $shrink-name, $shrink-source-address , $shrink-destination-address , $shrink-application , $action, $idp, $scheduling, $shaping, $logging, $counting, $ha-backup, $appfw, $uac, $wx, $gprs);
+            call print-policy($row = $row + 1, $num-rows, $source-address, $destination-address, $application);
+        }
+	}
+}
+
+/* find-zone: Returns the zone where a given IP is */
+template find-zone ($ip) {
+    
+    if ($ip == "0.0.0.0/0") {
+        expr "any";
+    
+    } else {
+        var $get-route-rpc = <command> {
+            expr "show route ";
+            expr $ip;
+            expr " active-path best";
+        }
+        var $get-route = jcs:execute($connection, $get-route-rpc);
+        var $zone = {
+            if ($get-route//via) {
+                var $get-int-rpc = <command> {
+                    expr "show interface ";
+                    expr $get-route//via;
+                }
+                var $get-int = jcs:execute($connection, $get-int-rpc);
+                
+                expr $get-int//logical-interface-zone-name;
+            
+            } else {
+                expr "any";
+            }
+        }
+        expr $zone;
+    }
+}
+
+/* Template for comparing the search IP addresses to the policy IP addresses */
+template ip-match ($ip, $prefix-list) {
+
+    if (not($prefix-list)) {
+        expr false();	
+    }
+    else if ($ip == "0.0.0.0/0") {
+    	expr true();
+    }
+    else {
+	
+     var $search-parsed = jcs:parse-ip($ip); 
+
+     var $target-parsed = jcs:parse-ip($prefix-list);
+     
+     var $new-search-ip = {
+    	    expr $search-parsed[1];
+    	    expr "/";
+    	    expr $target-parsed[3];
+     }
+     
+     var $new-search-parsed = jcs:parse-ip($new-search-ip);
+
+     if ($new-search-parsed[4] == $target-parsed[4]) {
+     	    expr true();
+     }
+   }
+}
+
+/* find-zone: Returns the zone where a given IP is */
+template find-policy-id ($id) {
+    
+    if ($ip == "0.0.0.0/0") {
+        expr "any";
+    
+    } else {
+        var $get-route-rpc = <command> {
+            expr "show route ";
+            expr $ip;
+            expr " active-path best";
+        }
+        var $get-route = jcs:execute($connection, $get-route-rpc);
+        var $zone = {
+            if ($get-route//via) {
+                var $get-int-rpc = <command> {
+                    expr "show interface ";
+                    expr $get-route//via;
+                }
+                var $get-int = jcs:execute($connection, $get-int-rpc);
+                
+                expr $get-int//logical-interface-zone-name;
+            
+            } else {
+                expr "any";
+            }
+        }
+        expr $zone;
+    }
+}
+
+/* Template to truncate any names longer than column lengths and append a "~". */
+template fit-to-column ($name, $from-zone, $to-zone, $test-sourceIP, $test-destIP, $test-application, $row ) {
+
+var $name-length = string-length($name);
+var $from-zone-length = string-length($from-zone);
+var $to-zone-length = string-length($to-zone);
+var $sourceIP-length = string-length($test-sourceIP);
+var $destIP-length = string-length($test-destIP);
+var $application-length = string-length($test-application);
+
+	if ($name-length < 12) {
+		expr $name;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{11}", $name);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		} 
+	if ($from-zone-length < 10) {
+		expr $from-zone;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{9}", $from-zone);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		} 
+	if ($to-zone-length < 10){
+		expr $to-zone;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{9}", $to-zone);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		}
+	if ($sourceIP-length < 20){
+		expr $test-sourceIP;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{19}", $test-sourceIP);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		}
+	if ($destIP-length < 20){
+		expr $test-destIP;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{19}", $test-destIP);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		}
+	if ($application-length < 20){
+		expr $test-application;
+		} else {
+			var $regex = jcs:regex("[[:alnum:][:punct:]]{19}", $test-application);  /* an alternate could be "[0-9a-zA-Z\\.\\-\\_\\/]{#}" */
+			expr concat($regex, "~");
+		}
+	}
+
+/*OP  Script Starts here*/
+match / {
+	<op-script-results>{
+	/* First, check parameters passed */
+		if (not(jcs:parse-ip($source-address))) {
+            <output> jcs:printf("Bad IP address format: %s", $source-address);
+        
+        } if (not(jcs:parse-ip($destination-address))) {
+            <output> jcs:printf("Bad IP address format: %s", $destination-address);
+        
+        } else if (not($source-port >= 0 && $source-port <= 65535)) {
+            <output> jcs:printf("Bad IP port number: %s", $source-port);
+        
+        } else if (not($destination-port >= 0 && $destination-port <= 65535)) {
+            <output> jcs:printf("Bad IP port number: %s", $destination-port);
+        
+        } else {			
+			var $filters = {
+                if ($from-zone = "global") {
+					expr " global ";
+                } else if ( $from-zone != "any" ) {
+					expr " from-zone ";
+					expr $from-zone;
+				}
+                if ($to-zone = "global") {
+                    expr " global ";
+                } else if ($to-zone != "any") {
+                    expr " to-zone ";
+                    expr $to-zone;
+                }
+            }
+			var $get-policies-rpc = <command> {
+                expr " show security policies ";
+                expr $filters;
+                expr " detail ";
+            }	
+			
+			/* Get the list of possible policies */
+            var $policies = jcs:execute($connection, $get-policies-rpc);
+			
+			/* Finds, matches and counts all regular (excluding Global) Security Policy IDs*/
+			var $matched-regular-policies := {	
+				for-each( $policies//policy-information )
+				{
+					if (../../context-information/source-zone-name) {
+						var $mypolicyid = policy-identifier;
+						var $myregex = jcs:regex("[0-9]{1,}", $mypolicyid);
+						if ( contains(policy-identifier, $myregex))
+						{
+							copy-of policy-identifier;
+						}
+					} 
+				}
+			}			
+			var $num-regular-matches = count( $matched-regular-policies/policy-identifier );
+			var $default-pol = $policies//default-policy;
+			
+			/* Finds, matches and counts all Global Security Policy IDs*/
+			var $matched-global-policies := {	
+				for-each( $policies//policy-information )
+				{
+					if (../../context-information/global-context) {
+						var $mypolicyid = policy-identifier;
+						var $myregex = jcs:regex("[0-9]{1,}", $mypolicyid);
+						if ( contains(policy-identifier, $myregex))
+						{
+							copy-of policy-identifier;
+						}
+					} 
+				}
+			}			
+			var $num-global-matches = count( $matched-global-policies/policy-identifier );
+			<output> { 
+				call print-policy($default-pol, $num-regular-matches, $num-global-matches, $header = true());
+			}
+			
+            /* Loop throught the policies to find the matching ones */            
+            for-each ($policies//policy-information) {
+                var $match-source = {
+                    call ip-match($ip = $source-address, $prefix-list = .//source-address//address-prefix);
+                }
+                var $match-destination = {
+                    call ip-match($ip = $destination-address, $prefix-list = .//destination-address//address-prefix);
+                }
+                var $match-destination-port = {
+                    if ($destination-port == "0") {
+                        expr true();
+                    
+                    } else if (./applications/application/application-term/destination-port-range[low == "0" && high == "0"]) {
+                        expr true();
+                    
+                    } else if (./applications/application/application-term/destination-port-range[low <= $destination-port && high >= $destination-port]) {
+                        expr true();
+                    
+                    } else {
+                        expr false();
+                    }
+                }
+                var $match-source-port = {
+                    if ($source-port == "0") {
+                        expr true();
+                    
+                    } else if (./applications/application/application-term/source-port-range[low == "0" && high == "0"]) {
+                        expr true();
+                    
+                    } else if (./applications/application/application-term/source-port-range[low <= $source-port && high >= $source-port]) {
+                        expr true();
+                    
+                    } else {
+                        expr false();
+                    }
+                }  
+				
+				/* Discover if IDP is enabled on the policy */
+				var $idp = {
+					if (./policy-application-services/idp = "enabled" ) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Discover if policy scheduling is enabled on the policy */
+				var $scheduling = {
+					if (./policy-scheduler/attached-scheduler-name) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Traffic shaping via policy not supported - defaults to "-" */
+				var $shaping = "-";
+				
+				/* Discover if logging is enabled on the policy */
+				var $logging = {
+					if (./policy-log/log-session-creation || ./policy-log/log-session-close) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Discover if counting is enabled on the policy */
+				var $counting = {
+					if (./policy-statistics-information) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* HA backup - defaults to "x" */
+				var $ha-backup = "x";
+				
+				/* Discover if AppFW is enabled on the policy */
+				var $appfw = {
+					if (./policy-application-services/application-firewall) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Discover if UAC is enabled on the policy */
+				var $uac = {
+					if (./policy-application-services/uac-policy && ./policy-application-services/uac-policy != "disabled") {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Discover if WX is enabled on the policy */
+				var $wx = {
+					if (./policy-application-services/wan-acceleration) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Discover if GPRS is enabled on the policy */
+				var $gprs = {
+					if (./policy-application-services/gprs-gtp-profile || ./policy-application-services/gprs-sctp-profile ) {
+						expr "x";
+					} else {
+						expr "-";
+					}
+				}
+				
+				/* Testing for Global policies */
+				var $regular-src-zone = ../../context-information/source-zone-name;
+				var $regular-dst-zone = ../../context-information/destination-zone-name;
+				var $from-zone = {
+					if ( $regular-src-zone ) {
+						expr $regular-src-zone;
+					} else {
+						expr "global";
+					}
+				}
+				var $to-zone = {
+					if ( $regular-dst-zone ) {
+						expr $regular-dst-zone;
+					} else {
+						expr "global";
+					}
+				}
+				
+				
+                if ($match-source == "true" && $match-destination == "true" && $match-source-port == "true" && $match-destination-port == "true") {
+                    <output> {
+                        call print-policy($policy-id = ./policy-identifier, $from-zone, $to-zone, $name = ./policy-name, $destination-address = ./destination-addresses/destination-address/address-name, $source-address = ./source-addresses/source-address/address-name, $application = ./applications/application/application-name, $action = ./policy-action/action-type, $idp, $scheduling, $shaping, $logging, $counting, $ha-backup, $appfw, $uac, $wx, $gprs);
+                    }
+                }
+            }           
+        }
+	}
+}
